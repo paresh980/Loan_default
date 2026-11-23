@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loan default risk scorer</title>
+  <meta name="description" content="Score a loan application with a machine-learning model trained on 255,000 historical loans.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Hanken+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+{% macro num(name, label, lo, hi, value, step=1, prefix='', suffix='') -%}
+  <div class="field" data-field="{{ name }}">
+    <label for="{{ name }}">{{ label }}</label>
+    <div class="control">
+      {% if prefix %}<span class="affix">{{ prefix }}</span>{% endif %}
+      <input id="{{ name }}" name="{{ name }}" type="number" inputmode="decimal"
+             min="{{ lo }}" max="{{ hi }}" step="{{ step }}" value="{{ value }}" required>
+      {% if suffix %}<span class="affix">{{ suffix }}</span>{% endif %}
+    </div>
+    <p class="hint" id="{{ name }}-hint">{{ lo }} to {{ hi }}</p>
+    <p class="error" id="{{ name }}-error" role="alert"></p>
+  </div>
+{%- endmacro %}
+
+{% macro sel(name, label, options, value) -%}
+  <div class="field" data-field="{{ name }}">
+    <label for="{{ name }}">{{ label }}</label>
+    <div class="control">
+      <select id="{{ name }}" name="{{ name }}" required>
+        {% for o in options %}<option value="{{ o }}" {{ 'selected' if o == value }}>{{ o }}</option>{% endfor %}
+      </select>
+    </div>
+    <p class="error" id="{{ name }}-error" role="alert"></p>
+  </div>
+{%- endmacro %}
+
+<header class="site-header">
+  <h1>Loan default risk scorer</h1>
+  <p>Enter an applicant’s details and the model returns a risk score, plus the factors that moved it most.</p>
+</header>
+
+<main class="layout">
+  <form id="applicant-form" class="form" novalidate>
+    <div class="presets">
+      <span>Fill with an example:</span>
+      <button type="button" class="link" data-preset="low">Strong applicant</button>
+      <button type="button" class="link" data-preset="high">Stretched applicant</button>
+    </div>
+
+    <fieldset>
+      <legend>About the applicant</legend>
+      <div class="grid">
+        {{ num('Age', 'Age', numeric['Age'][0], numeric['Age'][1], 30, suffix='years') }}
+        {{ sel('Education', 'Education', categorical['Education'], "Bachelor's") }}
+        {{ sel('MaritalStatus', 'Marital status', categorical['MaritalStatus'], 'Single') }}
+        {{ sel('HasDependents', 'Has dependents', categorical['HasDependents'], 'No') }}
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Work and credit</legend>
+      <div class="grid">
+        {{ sel('EmploymentType', 'Employment type', categorical['EmploymentType'], 'Full-time') }}
+        {{ num('MonthsEmployed', 'Time in current job', numeric['MonthsEmployed'][0], numeric['MonthsEmployed'][1], 36, suffix='months') }}
+        {{ num('Income', 'Annual income', numeric['Income'][0], numeric['Income'][1], 60000, step=1000, prefix='₹') }}
+        {{ num('CreditScore', 'Credit score', numeric['CreditScore'][0], numeric['CreditScore'][1], 650) }}
+        {{ num('DTIRatio', 'Debt-to-income ratio', numeric['DTIRatio'][0], numeric['DTIRatio'][1], 0.4, step=0.01) }}
+        {{ num('NumCreditLines', 'Open credit lines', numeric['NumCreditLines'][0], numeric['NumCreditLines'][1], 2) }}
+        {{ sel('HasMortgage', 'Has a mortgage', categorical['HasMortgage'], 'No') }}
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>The loan</legend>
+      <div class="grid">
+        {{ num('LoanAmount', 'Loan amount', numeric['LoanAmount'][0], numeric['LoanAmount'][1], 50000, step=1000, prefix='₹') }}
+        {{ sel('LoanPurpose', 'Purpose', categorical['LoanPurpose'], 'Auto') }}
+        {{ num('InterestRate', 'Interest rate', numeric['InterestRate'][0], numeric['InterestRate'][1], 10, step=0.1, suffix='%') }}
+        <div class="field" data-field="LoanTerm">
+          <label for="LoanTerm">Loan term</label>
+          <div class="control">
+            <select id="LoanTerm" name="LoanTerm" required>
+              {% for t in [12, 24, 36, 48, 60] %}<option value="{{ t }}" {{ 'selected' if t == 36 }}>{{ t }} months</option>{% endfor %}
+            </select>
+          </div>
+          <p class="error" id="LoanTerm-error" role="alert"></p>
+        </div>
+        {{ sel('HasCoSigner', 'Has a co-signer', categorical['HasCoSigner'], 'No') }}
+      </div>
+    </fieldset>
+
+    <button type="submit" class="primary" id="submit-btn">Score application</button>
+  </form>
+
+  <aside class="result" id="result" aria-live="polite" tabindex="-1">
+    <div class="panel" id="panel" data-state="empty">
+
+      <div class="empty">
+        <h2>No score yet</h2>
+        <p>Fill in the form and choose <strong>Score application</strong>. The result appears here.</p>
+      </div>
+
+      <div class="scored" hidden>
+        <h2 id="verdict-title"></h2>
+        <p id="verdict-text" class="verdict-text"></p>
+
+        <div class="score-row">
+          <span class="score" id="score">0%</span>
+          <span class="score-label">model risk score</span>
+        </div>
+
+        <div class="gauge" role="img" id="gauge" aria-label="">
+          <div class="track">
+            <div class="zone ok" id="zone-ok"></div>
+            <div class="zone flag" id="zone-flag"></div>
+            <div class="tick" id="tick"><span>review at {{ '%d' % (threshold * 100) }}%</span></div>
+            <div class="marker" id="marker"></div>
+          </div>
+          <div class="scale"><span>0%</span><span>100%</span></div>
+        </div>
+
+        <h3>What moved the score</h3>
+        <ul class="factors" id="factors"></ul>
+
+        <dl class="facts">
+          <div><dt>Estimated monthly payment</dt><dd id="fact-emi"></dd></div>
+          <div><dt>Payment as share of monthly income</dt><dd id="fact-pti"></dd></div>
+        </dl>
+      </div>
+
+      <p class="form-error" id="form-error" role="alert" hidden></p>
+    </div>
+
+    <p class="disclaimer">
+      The score ranks applicants by relative risk. It is not a calibrated chance of default,
+      because the model was trained with extra weight on the rarer default cases. Use it to
+      support a review, not to approve or decline a loan.
+    </p>
+  </aside>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
